@@ -9,10 +9,10 @@ export default function Home() {
 
   return (
     <main className="flex h-screen overflow-hidden bg-gray-50">
-      <div className="w-1/2 border-r border-gray-200 flex flex-col">
+      <div className="w-1/3 border-r border-gray-200 flex flex-col">
         <ChatPanel onSvgUpdate={setSvg} />
       </div>
-      <div className="w-1/2 flex flex-col">
+      <div className="w-2/3 flex flex-col">
         <CanvasPanel svg={svg} onSvgUpdate={setSvg} />
       </div>
     </main>
