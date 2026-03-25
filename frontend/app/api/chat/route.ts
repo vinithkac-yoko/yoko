@@ -82,7 +82,9 @@ export async function POST(req: NextRequest) {
       ],
     });
 
-    const text = response.choices[0]?.message?.content ?? "{}";
+    const raw = response.choices[0]?.message?.content ?? "{}";
+    // Strip markdown code fences if model wrapped the JSON
+    const text = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
     const parsed = JSON.parse(text);
     commands = parsed.commands ?? [];
     reply = parsed.reply ?? "";
