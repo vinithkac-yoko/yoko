@@ -8,7 +8,9 @@
     "start": "next start"
   },
   "dependencies": {
+    "@resvg/resvg-js": "^2.6.2",
     "next": "15.2.3",
+    "openai": "^6.32.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },

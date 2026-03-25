@@ -1,70 +1,34 @@
 import { NextRequest, NextResponse } from "next/server";
+import OpenAI from "openai";
+import { Resvg } from "@resvg/resvg-js";
 
 const BACKEND = "http://localhost:8000";
 
-interface Command {
-  action: string;
-  [key: string]: unknown;
-}
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-/** Parse natural language into pattern commands using regex. */
-function parseMessage(msg: string): Command[] {
-  const text = msg.trim().toLowerCase();
-  const commands: Command[] = [];
+const SYSTEM_PROMPT = `You are a pattern drafting assistant for a sewing pattern canvas.
+The image shows the current state of the pattern: a grid in mm, navy dots are labelled points, black lines/curves connect them.
 
-  // reset
-  if (/^reset$/.test(text)) {
-    commands.push({ action: "reset" });
-    return commands;
-  }
+Given the user's instruction, output ONLY valid JSON in this exact format (no markdown, no extra text):
+{"commands": [...], "reply": "..."}
 
-  // add point X at x,y  or  add point X at x y
-  const addPt = msg.match(/add\s+point\s+(\w+)\s+at\s+([\d.]+)[,\s]+([\d.]+)/i);
-  if (addPt) {
-    commands.push({ action: "add_point", name: addPt[1], x: parseFloat(addPt[2]), y: parseFloat(addPt[3]) });
-  }
+Available commands:
+- {"action": "add_point", "name": "E", "x": 100, "y": 50}
+- {"action": "move_point", "name": "A", "x": 0, "y": 10}
+- {"action": "add_line", "from_point": "A", "to_point": "B"}
+- {"action": "add_curve", "from_point": "A", "to_point": "B", "c1x": 50, "c1y": 10, "c2x": 150, "c2y": 10}
+- {"action": "set_measurement", "name": "bust", "value": 96}
+- {"action": "delete_point", "name": "E"}
+- {"action": "reset"}
 
-  // move point X to x,y
-  const movePt = msg.match(/move\s+point\s+(\w+)\s+to\s+([\d.]+)[,\s]+([\d.]+)/i);
-  if (movePt) {
-    commands.push({ action: "move_point", name: movePt[1], x: parseFloat(movePt[2]), y: parseFloat(movePt[3]) });
-  }
+Coordinates are in mm. The canvas is 200mm wide × 300mm tall.
+Look at the image to understand which points already exist before deciding what commands to emit.
+If you cannot fulfill the request, set commands to [] and explain in reply.`;
 
-  // draw line from A to B  |  add line from A to B
-  const addLn = msg.match(/(?:draw|add)\s+line\s+from\s+(\w+)\s+to\s+(\w+)/i);
-  if (addLn) {
-    commands.push({ action: "add_line", from_point: addLn[1], to_point: addLn[2] });
-  }
-
-  // add curve from A to B c1 x1,y1 c2 x2,y2
-  const addCv = msg.match(
-    /add\s+curve\s+from\s+(\w+)\s+to\s+(\w+)\s+c1\s+([\d.]+)[,\s]+([\d.]+)\s+c2\s+([\d.]+)[,\s]+([\d.]+)/i
-  );
-  if (addCv) {
-    commands.push({
-      action: "add_curve",
-      from_point: addCv[1],
-      to_point: addCv[2],
-      c1x: parseFloat(addCv[3]),
-      c1y: parseFloat(addCv[4]),
-      c2x: parseFloat(addCv[5]),
-      c2y: parseFloat(addCv[6]),
-    });
-  }
-
-  // set <measurement> to <value>
-  const setM = msg.match(/set\s+(\w+)\s+to\s+([\d.]+)/i);
-  if (setM) {
-    commands.push({ action: "set_measurement", name: setM[1], value: parseFloat(setM[2]) });
-  }
-
-  // delete point X
-  const delPt = msg.match(/delete\s+point\s+(\w+)/i);
-  if (delPt) {
-    commands.push({ action: "delete_point", name: delPt[1] });
-  }
-
-  return commands;
+async function svgToPngBase64(svg: string): Promise<string> {
+  const resvg = new Resvg(svg, { fitTo: { mode: "width", value: 800 } });
+  const pngData = resvg.render().asPng();
+  return pngData.toString("base64");
 }
 
 export async function POST(req: NextRequest) {
@@ -74,28 +38,67 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "message required" }, { status: 400 });
   }
 
-  const commands = parseMessage(message);
-
-  if (commands.length === 0) {
-    // No commands parsed — fetch current SVG and return helpful message
-    let svg = "";
-    try {
-      const r = await fetch(`${BACKEND}/pattern/svg`);
-      const d = await r.json();
-      svg = d.svg;
-    } catch {
-      // backend unreachable
-    }
-    return NextResponse.json({
-      reply:
-        "I didn't understand that. Try:\n• add point E at 100,50\n• draw line from A to E\n• set bust to 96\n• move point B to 210,0\n• delete point E\n• reset",
-      commands: [],
-      errors: [],
-      svg,
-    });
+  // 1. Get current canvas SVG
+  let svg = "";
+  try {
+    const r = await fetch(`${BACKEND}/pattern/svg`);
+    const d = await r.json();
+    svg = d.svg;
+  } catch {
+    return NextResponse.json(
+      { reply: "Error: cannot reach the pattern backend at localhost:8000", commands: [], errors: [], svg: "" },
+      { status: 502 }
+    );
   }
 
-  // Send commands to backend
+  // 2. Rasterize SVG → PNG base64
+  let base64 = "";
+  try {
+    base64 = await svgToPngBase64(svg);
+  } catch (e) {
+    console.error("SVG rasterization failed:", e);
+    // fall through — we'll send text-only if this fails
+  }
+
+  // 3. Call GPT-4o with vision
+  let commands: unknown[] = [];
+  let reply = "";
+  try {
+    const content: OpenAI.Chat.ChatCompletionContentPart[] = [];
+    if (base64) {
+      content.push({
+        type: "image_url",
+        image_url: { url: `data:image/png;base64,${base64}`, detail: "low" },
+      });
+    }
+    content.push({ type: "text", text: message });
+
+    const response = await client.chat.completions.create({
+      model: "gpt-4o",
+      max_tokens: 1024,
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content },
+      ],
+    });
+
+    const text = response.choices[0]?.message?.content ?? "{}";
+    const parsed = JSON.parse(text);
+    commands = parsed.commands ?? [];
+    reply = parsed.reply ?? "";
+  } catch (e) {
+    console.error("OpenAI call failed:", e);
+    return NextResponse.json(
+      { reply: "Error calling OpenAI API.", commands: [], errors: [], svg },
+      { status: 500 }
+    );
+  }
+
+  if (commands.length === 0) {
+    return NextResponse.json({ reply: reply || "No actions needed.", commands: [], errors: [], svg });
+  }
+
+  // 4. Execute commands via backend
   try {
     const res = await fetch(`${BACKEND}/pattern/command`, {
       method: "POST",
@@ -109,13 +112,14 @@ export async function POST(req: NextRequest) {
     );
 
     const applied: number = data.applied?.length ?? 0;
-    let reply = "";
-    if (applied > 0 && errorMessages.length === 0) {
-      reply = `Applied ${applied} command${applied !== 1 ? "s" : ""} successfully.`;
-    } else if (applied > 0) {
-      reply = `Applied ${applied} command${applied !== 1 ? "s" : ""}. Some had errors.`;
-    } else {
-      reply = "No commands could be applied.";
+    if (!reply) {
+      if (applied > 0 && errorMessages.length === 0) {
+        reply = `Applied ${applied} command${applied !== 1 ? "s" : ""} successfully.`;
+      } else if (applied > 0) {
+        reply = `Applied ${applied} command${applied !== 1 ? "s" : ""}. Some had errors.`;
+      } else {
+        reply = "No commands could be applied.";
+      }
     }
 
     return NextResponse.json({
