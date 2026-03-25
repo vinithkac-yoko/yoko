@@ -87,9 +87,10 @@ export async function POST(req: NextRequest) {
     commands = parsed.commands ?? [];
     reply = parsed.reply ?? "";
   } catch (e) {
-    console.error("OpenAI call failed:", e);
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("OpenAI call failed:", msg);
     return NextResponse.json(
-      { reply: "Error calling OpenAI API.", commands: [], errors: [], svg },
+      { reply: `Error calling OpenAI API: ${msg}`, commands: [], errors: [], svg },
       { status: 500 }
     );
   }
