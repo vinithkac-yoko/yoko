@@ -12,3 +12,5 @@ frontend/.next/
 # Misc
 .DS_Store
 *.env
+.env.local
+.env.*.local
